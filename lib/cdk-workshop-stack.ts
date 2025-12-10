@@ -1,65 +1,60 @@
-import * as cdk from "aws-cdk-lib";
+import { Stack, StackProps, Duration, CfnOutput } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import * as lambda from "aws-cdk-lib/aws-lambda";
-import * as lambdaNode from "aws-cdk-lib/aws-lambda-nodejs";
-import * as opensearch from "aws-cdk-lib/aws-opensearchserverless";
-import * as iam from "aws-cdk-lib/aws-iam";
-import * as path from "path";
+import { Runtime, Code } from "aws-cdk-lib/aws-lambda";
+import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
+import {
+  CfnCollection,
+  CfnSecurityPolicy,
+  CfnAccessPolicy,
+} from "aws-cdk-lib/aws-opensearchserverless";
+import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
 import { LambdaRestApi } from "aws-cdk-lib/aws-apigateway";
+import * as path from "path"; // path is often best kept as a namespace import
 
-export class CdkWorkshopStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+export class CdkWorkshopStack extends Stack {
+  constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
     const COLLECTION_NAME = "workshop-collection";
 
     // 1. Encryption Policy (Required for Collection)
-    const encryptionPolicy = new opensearch.CfnSecurityPolicy(
-      this,
-      "EncryptionPolicy",
-      {
-        name: "workshop-encryption-policy",
-        type: "encryption",
-        policy: JSON.stringify({
+    const encryptionPolicy = new CfnSecurityPolicy(this, "EncryptionPolicy", {
+      name: "workshop-encryption-policy",
+      type: "encryption",
+      policy: JSON.stringify({
+        Rules: [
+          {
+            ResourceType: "collection",
+            Resource: [`collection/${COLLECTION_NAME}`],
+          },
+        ],
+        AWSOwnedKey: true,
+      }),
+    });
+
+    // 2. Network Policy (Required to allow Public Access)
+    const networkPolicy = new CfnSecurityPolicy(this, "NetworkPolicy", {
+      name: "workshop-network-policy",
+      type: "network",
+      policy: JSON.stringify([
+        {
           Rules: [
             {
               ResourceType: "collection",
               Resource: [`collection/${COLLECTION_NAME}`],
             },
+            {
+              ResourceType: "dashboard",
+              Resource: [`collection/${COLLECTION_NAME}`],
+            },
           ],
-          AWSOwnedKey: true,
-        }),
-      }
-    );
-
-    // 2. Network Policy (Required to allow Public Access)
-    // Note: We are allowing public access so Lambda (outside VPC) can reach it.
-    const networkPolicy = new opensearch.CfnSecurityPolicy(
-      this,
-      "NetworkPolicy",
-      {
-        name: "workshop-network-policy",
-        type: "network",
-        policy: JSON.stringify([
-          {
-            Rules: [
-              {
-                ResourceType: "collection",
-                Resource: [`collection/${COLLECTION_NAME}`],
-              },
-              {
-                ResourceType: "dashboard",
-                Resource: [`collection/${COLLECTION_NAME}`],
-              },
-            ],
-            AllowFromPublic: true,
-          },
-        ]),
-      }
-    );
+          AllowFromPublic: true,
+        },
+      ]),
+    });
 
     // 3. OpenSearch Serverless Collection
-    const collection = new opensearch.CfnCollection(this, "Collection", {
+    const collection = new CfnCollection(this, "Collection", {
       name: COLLECTION_NAME,
       type: "SEARCH", // 'SEARCH' is best for standard CRUD text search
       description: "Collection for CRUD workshop",
@@ -70,11 +65,11 @@ export class CdkWorkshopStack extends cdk.Stack {
     collection.addDependency(networkPolicy);
 
     // 4. Lambda Function
-    const fn = new lambdaNode.NodejsFunction(this, "OSLambda", {
+    const fn = new NodejsFunction(this, "OSLambda", {
       entry: path.join(__dirname, "../lambda/opensearch.js"), // Adjust path if needed
       handler: "main",
-      runtime: lambda.Runtime.NODEJS_18_X,
-      timeout: cdk.Duration.seconds(30), // Increased timeout for AOSS connection
+      runtime: Runtime.NODEJS_18_X,
+      timeout: Duration.seconds(30), // Increased timeout for AOSS connection
       environment: {
         OPENSEARCH_ENDPOINT: collection.attrCollectionEndpoint,
         AWS_CDK_REGION: this.region,
@@ -86,49 +81,45 @@ export class CdkWorkshopStack extends cdk.Stack {
     });
 
     // 5. Data Access Policy (Crucial: Grants Lambda permission INSIDE OpenSearch)
-    const accessPolicy = new opensearch.CfnAccessPolicy(
-      this,
-      "DataAccessPolicy",
-      {
-        name: "workshop-access-policy",
-        type: "data",
-        policy: JSON.stringify([
-          {
-            Rules: [
-              {
-                ResourceType: "collection",
-                Resource: [`collection/${COLLECTION_NAME}`],
-                Permission: [
-                  "aoss:CreateCollectionItems",
-                  "aoss:DeleteCollectionItems",
-                  "aoss:UpdateCollectionItems",
-                  "aoss:DescribeCollectionItems",
-                ],
-              },
-              {
-                ResourceType: "index",
-                Resource: [`index/${COLLECTION_NAME}/*`],
-                Permission: [
-                  "aoss:CreateIndex",
-                  "aoss:DeleteIndex",
-                  "aoss:UpdateIndex",
-                  "aoss:DescribeIndex",
-                  "aoss:ReadDocument",
-                  "aoss:WriteDocument",
-                ],
-              },
-            ],
-            Principal: [fn.role!.roleArn],
-          },
-        ]),
-      }
-    );
+    const accessPolicy = new CfnAccessPolicy(this, "DataAccessPolicy", {
+      name: "workshop-access-policy",
+      type: "data",
+      policy: JSON.stringify([
+        {
+          Rules: [
+            {
+              ResourceType: "collection",
+              Resource: [`collection/${COLLECTION_NAME}`],
+              Permission: [
+                "aoss:CreateCollectionItems",
+                "aoss:DeleteCollectionItems",
+                "aoss:UpdateCollectionItems",
+                "aoss:DescribeCollectionItems",
+              ],
+            },
+            {
+              ResourceType: "index",
+              Resource: [`index/${COLLECTION_NAME}/*`],
+              Permission: [
+                "aoss:CreateIndex",
+                "aoss:DeleteIndex",
+                "aoss:UpdateIndex",
+                "aoss:DescribeIndex",
+                "aoss:ReadDocument",
+                "aoss:WriteDocument",
+              ],
+            },
+          ],
+          Principal: [fn.role!.roleArn],
+        },
+      ]),
+    });
 
     // 6. IAM Permissions (Grants Lambda permission to talk to the AOSS API service)
     fn.addToRolePolicy(
-      new iam.PolicyStatement({
+      new PolicyStatement({
         sid: "AllowAOSSAPI",
-        effect: iam.Effect.ALLOW,
+        effect: Effect.ALLOW,
         actions: ["aoss:APIAccessAll"],
         resources: [collection.attrArn],
       })
@@ -147,5 +138,11 @@ export class CdkWorkshopStack extends cdk.Stack {
     item.addMethod("GET");
     item.addMethod("PUT");
     item.addMethod("DELETE");
+
+    // Output the API Gateway URL for easy access
+    new CfnOutput(this, "ApiUrl", {
+      value: api.url,
+      description: "API Gateway URL for CRUD operations",
+    });
   }
 }
